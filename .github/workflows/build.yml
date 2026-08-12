@@ -1,0 +1,25 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build application
+        run: ./build_app.sh
+      - name: Verify bundle
+        run: |
+          plutil -lint "build/Жми.app/Contents/Info.plist"
+          codesign --verify --deep --strict "build/Жми.app"
+      - name: Package application
+        run: ditto -c -k --sequesterRsrc --keepParent "build/Жми.app" "build/Жми-macOS-arm64.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zhmi-macOS-arm64
+          path: build/Жми-macOS-arm64.zip
