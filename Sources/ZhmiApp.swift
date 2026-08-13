@@ -448,7 +448,7 @@ final class CompressorModel: ObservableObject {
                     directories: [outputFolder],
                     items: [WorkItem(
                         source: inputFile,
-                        destination: try uniqueOutputURL(for: inputFile, in: outputFolder),
+                        destination: try outputURL(for: inputFile, in: outputFolder),
                         kind: .compress
                     )]
                 )
@@ -467,7 +467,7 @@ final class CompressorModel: ObservableObject {
                 for video in videos {
                     items.append(WorkItem(
                         source: video,
-                        destination: try uniqueOutputURL(for: video, in: outputFolder, reserved: &reserved),
+                        destination: try outputURL(for: video, in: outputFolder, reserved: &reserved),
                         kind: .compress
                     ))
                 }
@@ -970,28 +970,12 @@ final class CompressorModel: ObservableObject {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: ffmpegPath)
-        process.arguments = [
-            "-hide_banner",
-            "-nostdin",
-            "-y",
-            "-i", file.path,
-            "-map", "0:v:0",
-            "-map", "0:a?",
-            "-dn",
-            "-sn",
-            "-vf", resolution.scaleFilter,
-            "-c:v", "libx264",
-            "-preset", compression.preset,
-            "-crf", compression.crf,
-            "-pix_fmt", "yuv420p",
-            "-tag:v", "avc1",
-            "-c:a", "aac",
-            "-b:a", compression.audioBitrate,
-            "-movflags", "+faststart",
-            "-progress", "pipe:1",
-            "-nostats",
-            output.path,
-        ]
+        process.arguments = ffmpegArguments(
+            input: file,
+            output: output,
+            resolution: resolution,
+            compression: compression
+        )
 
         let outputPipe = Pipe()
         let errorPipe = Pipe()
@@ -1162,7 +1146,7 @@ private func hierarchicalBatchPlan(from sourceFolders: [URL], outputFolder: URL)
         for entry in entries where !entry.isDirectory && isSupportedVideoFile(entry.source) {
             let relativeParent = entry.relativeComponents.dropLast()
             let destinationDirectory = appending(relativeParent, to: destinationRoot)
-            let destination = try uniqueOutputURL(
+            let destination = try preservedNameOutputURL(
                 for: entry.source,
                 in: destinationDirectory,
                 reserved: &reservedDestinations
@@ -1222,9 +1206,109 @@ private func isSupportedVideoFile(_ url: URL) -> Bool {
     return extensions.contains(url.pathExtension.lowercased())
 }
 
+private func ffmpegArguments(
+    input: URL,
+    output: URL,
+    resolution: Resolution,
+    compression: Compression
+) -> [String] {
+    var arguments = [
+        "-hide_banner", "-nostdin", "-y",
+        "-i", input.path,
+        "-map", "0:v:0", "-map", "0:a?",
+        "-dn", "-sn",
+        "-vf", resolution.scaleFilter,
+    ]
+
+    switch output.pathExtension.lowercased() {
+    case "webm":
+        arguments += [
+            "-c:v", "libvpx-vp9",
+            "-deadline", "good",
+            "-cpu-used", "4",
+            "-crf", compression.crf,
+            "-b:v", "0",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "libopus",
+            "-b:a", compression.audioBitrate,
+        ]
+    case "avi":
+        arguments += [
+            "-c:v", "libx264",
+            "-preset", compression.preset,
+            "-crf", compression.crf,
+            "-pix_fmt", "yuv420p",
+            "-c:a", "libmp3lame",
+            "-b:a", compression.audioBitrate,
+        ]
+    case "mkv":
+        arguments += [
+            "-c:v", "libx264",
+            "-preset", compression.preset,
+            "-crf", compression.crf,
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-b:a", compression.audioBitrate,
+        ]
+    default:
+        arguments += [
+            "-c:v", "libx264",
+            "-preset", compression.preset,
+            "-crf", compression.crf,
+            "-pix_fmt", "yuv420p",
+            "-tag:v", "avc1",
+            "-c:a", "aac",
+            "-b:a", compression.audioBitrate,
+            "-movflags", "+faststart",
+        ]
+    }
+
+    arguments += ["-progress", "pipe:1", "-nostats", output.path]
+    return arguments
+}
+
 private func uniqueOutputURL(for input: URL, in folder: URL) throws -> URL {
     var reserved = Set<String>()
     return try uniqueOutputURL(for: input, in: folder, reserved: &reserved)
+}
+
+private func outputURL(for input: URL, in folder: URL) throws -> URL {
+    var reserved = Set<String>()
+    return try outputURL(for: input, in: folder, reserved: &reserved)
+}
+
+private func outputURL(for input: URL, in folder: URL, reserved: inout Set<String>) throws -> URL {
+    let sourceFolder = input.deletingLastPathComponent().standardizedFileURL
+    if sourceFolder == folder.standardizedFileURL {
+        return try uniqueOutputURL(for: input, in: folder, reserved: &reserved)
+    }
+    return try preservedNameOutputURL(for: input, in: folder, reserved: &reserved)
+}
+
+private func preservedNameOutputURL(
+    for input: URL,
+    in folder: URL,
+    reserved: inout Set<String>
+) throws -> URL {
+    var candidate = folder.appendingPathComponent(input.lastPathComponent)
+    var path = candidate.standardizedFileURL.path
+    if !FileManager.default.fileExists(atPath: path), !reserved.contains(path) {
+        reserved.insert(path)
+        return candidate
+    }
+
+    let base = input.deletingPathExtension().lastPathComponent
+    let ext = input.pathExtension
+    for index in 2..<1000 {
+        let filename = ext.isEmpty ? "\(base)_\(index)" : "\(base)_\(index).\(ext)"
+        candidate = folder.appendingPathComponent(filename)
+        path = candidate.standardizedFileURL.path
+        if !FileManager.default.fileExists(atPath: path), !reserved.contains(path) {
+            reserved.insert(path)
+            return candidate
+        }
+    }
+    throw CompressionError.ffmpeg("Не удалось подобрать имя выходного файла.")
 }
 
 private func uniqueOutputURL(for input: URL, in folder: URL, reserved: inout Set<String>) throws -> URL {
