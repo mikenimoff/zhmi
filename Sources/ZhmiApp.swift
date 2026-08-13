@@ -316,6 +316,17 @@ final class AppNotifier: NSObject, UNUserNotificationCenterDelegate {
         )
     }
 
+    func updateAvailable(version: String, releaseURL: URL) {
+        let key = "lastNotifiedUpdateVersion"
+        guard UserDefaults.standard.string(forKey: key) != version else { return }
+        UserDefaults.standard.set(version, forKey: key)
+        send(
+            title: "Доступно обновление Жми \(version)",
+            body: "Откройте приложение, чтобы скачать новую версию с GitHub.",
+            badge: 1
+        )
+    }
+
     nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification
@@ -1350,8 +1361,100 @@ private func uniqueBatchRootURL(named name: String, in outputFolder: URL, reserv
     return outputFolder.appendingPathComponent(name + " — сжато \(UUID().uuidString)", isDirectory: true)
 }
 
+@MainActor
+final class UpdateChecker: ObservableObject {
+    @Published var isChecking = false
+    @Published var statusText = "Версия \(UpdateChecker.currentVersion)"
+    @Published var updateVersion: String?
+    @Published var releaseURL: URL?
+    @Published var downloadURL: URL?
+    @Published var showUpdateAlert = false
+
+    static var currentVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
+    }
+
+    private struct GitHubRelease: Decodable {
+        struct Asset: Decodable {
+            let name: String
+            let browserDownloadURL: URL
+
+            enum CodingKeys: String, CodingKey {
+                case name
+                case browserDownloadURL = "browser_download_url"
+            }
+        }
+
+        let tagName: String
+        let htmlURL: URL
+        let assets: [Asset]
+
+        enum CodingKeys: String, CodingKey {
+            case tagName = "tag_name"
+            case htmlURL = "html_url"
+            case assets
+        }
+    }
+
+    func check(manual: Bool = false) {
+        guard !isChecking else { return }
+        isChecking = true
+        statusText = "Проверяю обновления…"
+
+        Task {
+            do {
+                var request = URLRequest(
+                    url: URL(string: "https://api.github.com/repos/mikenimoff/zhmi/releases/latest")!
+                )
+                request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+                request.setValue("Zhmi/\(Self.currentVersion)", forHTTPHeaderField: "User-Agent")
+                request.timeoutInterval = 15
+
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+                    throw URLError(.badServerResponse)
+                }
+                let release = try JSONDecoder().decode(GitHubRelease.self, from: data)
+                let version = release.tagName.trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
+
+                releaseURL = release.htmlURL
+                downloadURL = release.assets.first(where: {
+                    $0.name.hasSuffix("macOS-arm64.zip")
+                })?.browserDownloadURL
+                isChecking = false
+
+                if version.compare(Self.currentVersion, options: .numeric) == .orderedDescending {
+                    updateVersion = version
+                    statusText = "Доступна версия \(version)"
+                    showUpdateAlert = true
+                    AppNotifier.shared.updateAvailable(version: version, releaseURL: release.htmlURL)
+                } else {
+                    updateVersion = nil
+                    statusText = "Установлена актуальная версия \(Self.currentVersion)"
+                    if manual { showUpdateAlert = false }
+                }
+            } catch {
+                isChecking = false
+                statusText = manual
+                    ? "Не удалось проверить обновления"
+                    : "Версия \(Self.currentVersion)"
+            }
+        }
+    }
+
+    func openUpdate() {
+        guard let url = downloadURL ?? releaseURL else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    func openReleases() {
+        NSWorkspace.shared.open(URL(string: "https://github.com/mikenimoff/zhmi/releases")!)
+    }
+}
+
 struct ContentView: View {
     @ObservedObject var model: CompressorModel
+    @StateObject private var updater = UpdateChecker()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1378,7 +1481,31 @@ struct ContentView: View {
                 }
                 .frame(maxWidth: .infinity)
 
-                VStack(spacing: 12) {
+                sidebar
+            }
+            .padding(24)
+        }
+        .frame(minWidth: 920, minHeight: 680)
+        .background(Color(nsColor: .windowBackgroundColor))
+        .task {
+            updater.check()
+        }
+        .alert("Доступно обновление", isPresented: $updater.showUpdateAlert) {
+            Button("Скачать с GitHub") {
+                updater.openUpdate()
+            }
+            Button("Позже", role: .cancel) {}
+        } message: {
+            Text(updateAlertMessage)
+        }
+    }
+
+    private var updateAlertMessage: String {
+        "Вышла версия Жми \(updater.updateVersion ?? ""). Сейчас установлена версия \(UpdateChecker.currentVersion)."
+    }
+
+    private var sidebar: some View {
+        VStack(spacing: 12) {
                     if model.resumeAvailable {
                         Button(action: model.resumeLastTask) {
                             VStack(spacing: 2) {
@@ -1429,6 +1556,46 @@ struct ContentView: View {
                     Divider()
 
                     VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Label("Обновления", systemImage: "arrow.triangle.2.circlepath")
+                                .font(.caption.weight(.semibold))
+                            Spacer()
+                            if updater.isChecking {
+                                ProgressView()
+                                    .controlSize(.small)
+                            }
+                        }
+
+                        Text(updater.statusText)
+                            .font(.footnote)
+                            .foregroundColor(Color(nsColor: updater.updateVersion == nil ? .secondaryLabelColor : .systemOrange))
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        if updater.updateVersion != nil {
+                            Button("Скачать обновление") {
+                                updater.openUpdate()
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(.orange)
+                            .frame(maxWidth: .infinity)
+                        } else {
+                            Button("Проверить обновления") {
+                                updater.check(manual: true)
+                            }
+                            .disabled(updater.isChecking)
+                        }
+
+                        Button("Все версии на GitHub") {
+                            updater.openReleases()
+                        }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    Divider()
+
+                    VStack(alignment: .leading, spacing: 8) {
                         Text("От разработчика")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
@@ -1441,16 +1608,11 @@ struct ContentView: View {
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .padding(16)
-                .frame(width: 270)
-                .background(.regularMaterial)
-                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-            }
-            .padding(24)
         }
-        .frame(minWidth: 920, minHeight: 680)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .padding(16)
+        .frame(width: 270)
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
     private var sourceBlock: some View {
