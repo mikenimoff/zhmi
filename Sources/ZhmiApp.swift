@@ -376,6 +376,7 @@ final class CompressorModel: ObservableObject {
     @Published var resumeAvailable = false
     @Published var resumePendingCount = 0
     @Published var resumeTaskDescription = ""
+    @Published var showResetTaskAlert = false
     @Published var currentProgress = 0.0
     @Published var overallProgress = 0.0
     @Published var log: [LogLine] = [LogLine(text: "Выберите папки и нажмите «Начать сжатие».")]
@@ -643,6 +644,27 @@ final class CompressorModel: ObservableObject {
                 compression: selectedCompression
             )
         }
+    }
+
+    func requestResetLastTask() {
+        guard !isRunning, resumeAvailable else { return }
+        showResetTaskAlert = true
+    }
+
+    func resetLastTask() {
+        guard !isRunning, resumeAvailable else { return }
+
+        clearJournal()
+        doneFiles = 0
+        failedFiles = 0
+        retryableFailures = 0
+        currentFile = "Текущий файл"
+        currentProgress = 0
+        overallProgress = 0
+        status = "Готово"
+        scanFiles()
+        log = [LogLine(text: "Незавершённая задача сброшена. Можно начать новое сжатие.")]
+        AppNotifier.shared.clearBadge()
     }
 
     private func recordFailure(_ item: WorkItem, error: Error) {
@@ -1498,6 +1520,14 @@ struct ContentView: View {
         } message: {
             Text(updateAlertMessage)
         }
+        .alert("Сбросить незавершённую задачу?", isPresented: $model.showResetTaskAlert) {
+            Button("Сбросить", role: .destructive) {
+                model.resetLastTask()
+            }
+            Button("Отмена", role: .cancel) {}
+        } message: {
+            Text("Журнал восстановления будет удалён. Исходные и уже готовые файлы останутся на месте.")
+        }
     }
 
     private var updateAlertMessage: String {
@@ -1520,6 +1550,12 @@ struct ContentView: View {
                         .buttonStyle(.borderedProminent)
                         .tint(.orange)
                         .disabled(model.isRunning)
+
+                        Button("Сбросить задачу", action: model.requestResetLastTask)
+                            .buttonStyle(.bordered)
+                            .tint(.red)
+                            .frame(maxWidth: .infinity)
+                            .disabled(model.isRunning)
                     }
 
                     Button(action: model.start) {
