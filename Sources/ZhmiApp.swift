@@ -153,6 +153,12 @@ struct LogLine: Identifiable {
     let text: String
 }
 
+private func percentForDisplay(_ value: Double, rounded: Bool = true) -> Int {
+    guard value < 1 else { return 100 }
+    let percent = rounded ? Int((value * 100).rounded()) : Int(value * 100)
+    return min(99, max(0, percent))
+}
+
 private final class ProgressWatch: @unchecked Sendable {
     private let lock = NSLock()
     private var lastProgress = Date()
@@ -231,9 +237,9 @@ private final class DockStatusView: NSView {
         )
         context.strokePath()
 
-        let text = "\(Int((value * 100).rounded()))%" as NSString
+        let text = "\(percentForDisplay(value, rounded: false))%" as NSString
         let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: max(12, diameter * 0.27), weight: .heavy),
+            .font: NSFont.systemFont(ofSize: max(16, diameter * 0.40), weight: .heavy),
             .foregroundColor: NSColor.labelColor,
         ]
         let size = text.size(withAttributes: attributes)
@@ -1820,19 +1826,23 @@ struct ContentView: View {
 
     private var progressBlock: some View {
         VStack(spacing: 14) {
-            progressRow(title: "Общий прогресс", value: model.overallProgress)
+            progressRow(title: "Общий прогресс", value: model.overallProgress, keepBelowCompletion: true)
             progressRow(title: model.currentFile, value: model.currentProgress)
         }
     }
 
-    private func progressRow(title: String, value: Double) -> some View {
+    private func progressRow(
+        title: String,
+        value: Double,
+        keepBelowCompletion: Bool = false
+    ) -> some View {
         VStack(spacing: 8) {
             HStack {
                 Text(title)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer()
-                Text("\(Int((value * 100).rounded()))%")
+                Text("\(percentForDisplay(value, rounded: !keepBelowCompletion))%")
             }
             .font(.caption)
             .foregroundStyle(.secondary)
